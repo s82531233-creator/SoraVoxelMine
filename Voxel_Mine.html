@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Voxel World</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:monospace;background:#87CEEB;overflow:hidden;touch-action:none}
+canvas{display:block;width:100vw;height:100vh}
+#ui{position:fixed;bottom:0;left:0;width:100%;height:100%;pointer-events:none;z-index:100}
+.joystick{position:absolute;bottom:20px;left:20px;width:100px;height:100px;background:rgba(0,0,0,0.3);border:3px solid rgba(255,255,255,0.5);border-radius:50%;pointer-events:auto}
+.joystick-handle{position:absolute;top:50%;left:50%;width:40px;height:40px;background:rgba(255,255,255,0.7);border:2px solid #fff;border-radius:50%;transform:translate(-50%,-50%);transition:all 0.1s}
+.btn{position:absolute;width:60px;height:60px;background:rgba(0,0,0,0.4);border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold;pointer-events:auto}
+.btn:active{background:rgba(255,255,255,0.6);transform:scale(0.95)}
+#jump{bottom:120px;right:20px}
+#attack{bottom:20px;right:20px;background:rgba(255,0,0,0.4)}
+#inventory{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);display:flex;gap:5px;pointer-events:auto}
+.inv-slot{width:50px;height:50px;background:rgba(0,0,0,0.5);border:2px solid #888;display:flex;align-items:center;justify-content:center;font-size:24px}
+.inv-slot.active{border-color:#ff0;background:rgba(255,255,0,0.3)}
+#look-area{position:absolute;top:0;right:0;width:40%;height:60%;pointer-events:auto}
+#info{position:absolute;top:10px;left:10px;color:#fff;font-size:12px;text-shadow:2px 2px 4px #000;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+<div class="joystick" id="joy"><div class="joystick-handle" id="joyH"></div></div>
+<div class="btn" id="jump">ПРЫЖОК</div>
+<div class="btn" id="attack">АТАКА</div>
+<div id="inventory">
+<div class="inv-slot" onclick="selectSlot(0)">✋</div>
+<div class="inv-slot active" onclick="selectSlot(1)">🔨</div>
+</div>
+<div id="look-area"></div>
+<div id="info">FPS: <span id="fps">60</span><br>Pos: <span id="pos">0,0,0</span><br>In house: <span id="inhouse">No</span></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const W=40,H=20,VSIZE=0.25;let scene,cam,renderer,clock,player,world=[],door,hammer,invSlot=1,joyActive=false,joyVec={x:0,y:0},vel=new THREE.Vector3(),camRot={x:0,y:0},onGround=false,inHouse=false,housePos={x:20,y:0,z:20},innerHouseGroup,outerHouseGroup;
+
+function init(){
+scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87CEEB);
+scene.fog=new THREE.Fog(0x87CEEB,0,60);
+cam=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.1,200);
+renderer=new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:false});
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.BasicShadowMap;
+clock=new THREE.Clock();
+
+const light=new THREE.DirectionalLight(0xffffff,1);
+light.position.set(50,100,50);
+light.castShadow=true;
+light.shadow.mapSize.width=512;
+light.shadow.mapSize.height=512;
+light.shadow.camera.left=-50;
+light.shadow.camera.right=50;
+light.shadow.camera.top=50;
+light.shadow.camera.bottom=-50;
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x606060));
+
+player={pos:new THREE.Vector3(20,10,20),rot:new THREE.Vector3(0,0,0),height:1.8};
+cam.position.copy(player.pos);
+
+generateWorld();
+createHammer();
+setupControls();
+animate();
+}
+
+function noise(x,z){
+return Math.sin(x*0.1)*Math.cos(z*0.1)*3+Math.sin(x*0.05+z*0.05)*2;
+}
+
+function generateWorld(){
+for(let x=0;x<W;x++){
+world[x]=[];
+for(let z=0;z<W;z++){
+world[x][z]=[];
+let h=Math.floor(5+noise(x,z));
+for(let y=0;y<h;y++){
+let col=y===h-1?0x228B22:0x8B4513;
+createBlock(x,y,z,col,false);
+}
+if(Math.random()>0.97&&h<H-5&&!(x>=housePos.x-1&&x<=housePos.x+6&&z>=housePos.z-1&&z<=housePos.z+6)){
+for(let i=0;i<4;i++){
+createBlock(x,h+i,z,i<3?0x8B4513:0x00AA00,true);
+}
+}
+}
+}
+
+const hy=Math.floor(5+noise(housePos.x,housePos.z));
+housePos.y=hy;
+createHouse(housePos.x,hy,housePos.z);
+}
+
+function createBlock(x,y,z,col,breakable=false,transparent=false){
+const g=new THREE.BoxGeometry(1,1,1);
+const m=new THREE.MeshLambertMaterial({color:col,transparent:transparent,opacity:transparent?0.5:1});
+const mesh=new THREE.Mesh(g,m);
+mesh.position.set(x+0.5,y+0.5,z+0.5);
+mesh.castShadow=!transparent;
+mesh.receiveShadow=true;
+if(breakable){
+mesh.userData.breakable=true;
+mesh.userData.voxels=[];
+for(let vx=0;vx<4;vx++){
+for(let vy=0;vy<4;vy++){
+for(let vz=0;vz<4;vz++){
+mesh.userData.voxels.push({x:vx,y:vy,z:vz,alive:true});
+}
+}
+}
+}
+scene.add(mesh);
+if(!world[x])world[x]=[];
+if(!world[x][z])world[x][z]=[];
+world[x][z][y]=mesh;
+return mesh;
+}
+
+function createHouse(x,y,z){
+outerHouseGroup=new THREE.Group();
+outerHouseGroup.name='outerHouse';
+scene.add(outerHouseGroup);
+
+innerHouseGroup=new THREE.Group();
+innerHouseGroup.name='innerHouse';
+innerHouseGroup.visible=false;
+innerHouseGroup.position.set(100,y,100);
+scene.add(innerHouseGroup);
+
+for(let i=0;i<5;i++){
+for(let j=0;j<5;j++){
+const floor=createBlock(x+i,y,z+j,0xA0522D,true);
+outerHouseGroup.attach(floor);
+const roof=createBlock(x+i,y+4,z+j,0x8B4513,true);
+outerHouseGroup.attach(roof);
+}
+}
+
+for(let h=1;h<4;h++){
+for(let i=0;i<5;i++){
+if(!(h<3&&i>1&&i<3&&h!==1)){
+const b1=createBlock(x+i,y+h,z,0xD2691E,true);
+outerHouseGroup.attach(b1);
+const b2=createBlock(x+i,y+h,z+4,0xD2691E,true);
+outerHouseGroup.attach(b2);
+}
+}
+for(let j=1;j<4;j++){
+const isWindow=j===2&&h===2;
+const b3=createBlock(x,y+h,z+j,isWindow?0x87CEEB:0xD2691E,true,isWindow);
+outerHouseGroup.attach(b3);
+const b4=createBlock(x+4,y+h,z+j,isWindow?0x87CEEB:0xD2691E,true,isWindow);
+outerHouseGroup.attach(b4);
+}
+}
+
+for(let i=0;i<15;i++){
+for(let j=0;j<15;j++){
+const floor=createBlock(100+i,y,100+j,0xA0522D,true);
+innerHouseGroup.attach(floor);
+const roof=createBlock(100+i,y+4,100+j,0x8B4513,true);
+innerHouseGroup.attach(roof);
+}
+}
+
+for(let h=1;h<4;h++){
+for(let i=0;i<15;i++){
+if(!(h<3&&i>6&&i<8)){
+const b1=createBlock(100+i,y+h,100,0xD2691E,true);
+innerHouseGroup.attach(b1);
+const b2=createBlock(100+i,y+h,100+14,0xD2691E,true);
+innerHouseGroup.attach(b2);
+}
+}
+for(let j=1;j<14;j++){
+const isWindow=j===7&&h===2;
+const b3=createBlock(100,y+h,100+j,isWindow?0x87CEEB:0xD2691E,true,isWindow);
+innerHouseGroup.attach(b3);
+const b4=createBlock(100+14,y+h,100+j,isWindow?0x87CEEB:0xD2691E,true,isWindow);
+innerHouseGroup.attach(b4);
+}
+}
+
+door={pos:new THREE.Vector3(x+2.5,y+1.5,z),open:false,rot:0};
+const dg=new THREE.BoxGeometry(2,2,0.2);
+const dm=new THREE.MeshLambertMaterial({color:0x654321});
+door.mesh=new THREE.Mesh(dg,dm);
+door.mesh.position.copy(door.pos);
+door.mesh.userData.isDoor=true;
+door.mesh.userData.breakable=true;
+door.mesh.userData.voxels=[];
+for(let v=0;v<16;v++)door.mesh.userData.voxels.push({alive:true});
+scene.add(door.mesh);
+}
+
+function createHammer(){
+hammer=new THREE.Group();
+const handle=new THREE.Mesh(new THREE.BoxGeometry(0.1,0.6,0.1),new THREE.MeshLambertMaterial({color:0x8B4513}));
+handle.position.y=-0.3;
+const head=new THREE.Mesh(new THREE.BoxGeometry(0.3,0.2,0.2),new THREE.MeshLambertMaterial({color:0x808080}));
+head.position.y=0.1;
+hammer.add(handle);
+hammer.add(head);
+hammer.visible=false;
+cam.add(hammer);
+scene.add(cam);
+}
+
+function setupControls(){
+const joy=document.getElementById('joy');
+const joyH=document.getElementById('joyH');
+
+joy.addEventListener('touchstart',e=>{
+e.preventDefault();
+joyActive=true;
+updateJoy(e.touches[0],joy,joyH);
+});
+joy.addEventListener('touchmove',e=>{
+e.preventDefault();
+if(joyActive)updateJoy(e.touches[0],joy,joyH);
+});
+joy.addEventListener('touchend',e=>{
+e.preventDefault();
+joyActive=false;
+joyVec={x:0,y:0};
+joyH.style.transform='translate(-50%,-50%)';
+});
+
+document.getElementById('jump').addEventListener('touchstart',e=>{
+e.preventDefault();
+if(onGround){vel.y=8;onGround=false;}
+});
+
+document.getElementById('attack').addEventListener('touchstart',e=>{
+e.preventDefault();
+if(invSlot===1)swingHammer();
+});
+
+const lookArea=document.getElementById('look-area');
+let lastTouch=null;
+lookArea.addEventListener('touchstart',e=>{
+lastTouch={x:e.touches[0].clientX,y:e.touches[0].clientY};
+});
+lookArea.addEventListener('touchmove',e=>{
+if(!lastTouch)return;
+const dx=e.touches[0].clientX-lastTouch.x;
+const dy=e.touches[0].clientY-lastTouch.y;
+camRot.y-=dx*0.003;
+camRot.x-=dy*0.003;
+camRot.x=Math.max(-Math.PI/2,Math.min(Math.PI/2,camRot.x));
+lastTouch={x:e.touches[0].clientX,y:e.touches[0].clientY};
+});
+lookArea.addEventListener('touchend',()=>{lastTouch=null;});
+
+renderer.domElement.addEventListener('click',e=>{
+const mouse=new THREE.Vector2((e.clientX/innerWidth)*2-1,-(e.clientY/innerHeight)*2+1);
+const raycaster=new THREE.Raycaster();
+raycaster.setFromCamera(mouse,cam);
+const intersects=raycaster.intersectObjects(scene.children,true);
+if(intersects.length>0&&intersects[0].object===door.mesh&&!door.open){
+toggleDoor();
+}
+});
+
+window.addEventListener('resize',()=>{
+cam.aspect=innerWidth/innerHeight;
+cam.updateProjectionMatrix();
+renderer.setSize(innerWidth,innerHeight);
+});
+}
+
+function updateJoy(touch,joy,handle){
+const rect=joy.getBoundingClientRect();
+const cx=rect.left+rect.width/2;
+const cy=rect.top+rect.height/2;
+let dx=touch.clientX-cx;
+let dy=touch.clientY-cy;
+const dist=Math.sqrt(dx*dx+dy*dy);
+const max=rect.width/2-20;
+if(dist>max){
+const ang=Math.atan2(dy,dx);
+dx=Math.cos(ang)*max;
+dy=Math.sin(ang)*max;
+}
+handle.style.transform=`translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+joyVec.x=dx/max;
+joyVec.y=dy/max;
+}
+
+function selectSlot(n){
+invSlot=n;
+document.querySelectorAll('.inv-slot').forEach((s,i)=>{
+s.classList.toggle('active',i===n);
+});
+hammer.visible=n===1;
+}
+
+function toggleDoor(){
+door.open=true;
+const anim=setInterval(()=>{
+door.rot+=0.05;
+door.mesh.rotation.y=door.rot;
+if(door.rot>=Math.PI/2){
+clearInterval(anim);
+door.mesh.visible=false;
+}
+},16);
+}
+
+function swingHammer(){
+if(hammer.userData.swinging)return;
+hammer.userData.swinging=true;
+const startRot=hammer.rotation.x;
+const swing=setInterval(()=>{
+hammer.rotation.x-=0.2;
+if(hammer.rotation.x<=-Math.PI/2){
+clearInterval(swing);
+checkHit();
+setTimeout(()=>{
+const back=setInterval(()=>{
+hammer.rotation.x+=0.2;
+if(hammer.rotation.x>=startRot){
+hammer.rotation.x=startRot;
+hammer.userData.swinging=false;
+clearInterval(back);
+}
+},16);
+},100);
+}
+},16);
+}
+
+function checkHit(){
+const ray=new THREE.Raycaster(cam.position,new THREE.Vector3(0,0,-1).applyQuaternion(cam.quaternion));
+const hits=ray.intersectObjects(scene.children,true);
+if(hits.length>0){
+const obj=hits[0].object;
+if(obj.userData.breakable){
+breakVoxels(obj);
+}
+}
+}
+
+function breakVoxels(obj){
+if(!obj.userData.voxels){
+scene.remove(obj);
+return;
+}
+const voxels=obj.userData.voxels.filter(v=>v.alive);
+if(voxels.length>20){
+for(let i=0;i<5&&voxels.length>0;i++){
+const idx=Math.floor(Math.random()*voxels.length);
+voxels[idx].alive=false;
+const geo=new THREE.BoxGeometry(VSIZE,VSIZE,VSIZE);
+const mat=new THREE.MeshLambertMaterial({color:obj.material.color});
+const piece=new THREE.Mesh(geo,mat);
+piece.position.copy(obj.position);
+piece.position.x+=(voxels[idx].x-2)*VSIZE;
+piece.position.y+=(voxels[idx].y-2)*VSIZE;
+piece.position.z+=(voxels[idx].z-2)*VSIZE;
+piece.userData.vel=new THREE.Vector3((Math.random()-0.5)*2,Math.random()*3,(Math.random()-0.5)*2);
+piece.userData.life=3;
+scene.add(piece);
+voxels.splice(idx,1);
+}
+if(voxels.length<10){
+scene.remove(obj);
+}
+}else{
+scene.remove(obj);
+}
+}
+
+function checkPortal(){
+const px=player.pos.x;
+const pz=player.pos.z;
+const doorX=housePos.x+2.5;
+const doorZ=housePos.z;
+
+if(!inHouse){
+const distToDoor=Math.sqrt(Math.pow(px-doorX,2)+Math.pow(pz-doorZ,2));
+if(distToDoor<1&&pz<doorZ+0.5){
+inHouse=true;
+player.pos.set(107.5,player.pos.y,100.5);
+outerHouseGroup.visible=false;
+innerHouseGroup.visible=true;
+scene.fog.far=30;
+document.getElementById('inhouse').textContent='YES';
+}
+}else{
+if(px<101||px>114||pz<100.5){
+inHouse=false;
+player.pos.set(doorX,player.pos.y,doorZ-2);
+outerHouseGroup.visible=true;
+innerHouseGroup.visible=false;
+scene.fog.far=60;
+document.getElementById('inhouse').textContent='No';
+}
+}
+}
+
+let lastTime=0,frameCount=0;
+function animate(){
+requestAnimationFrame(animate);
+const dt=Math.min(clock.getDelta(),0.1);
+const t=clock.getElapsedTime();
+
+frameCount++;
+if(t-lastTime>=1){
+document.getElementById('fps').textContent=frameCount;
+frameCount=0;
+lastTime=t;
+}
+
+vel.x*=0.8;
+vel.z*=0.8;
+vel.y-=20*dt;
+
+if(joyActive){
+const spd=5;
+const ang=camRot.y;
+vel.z+=Math.cos(ang)*joyVec.y*spd*dt;
+vel.x+=Math.sin(ang)*joyVec.y*spd*dt;
+vel.z+=-Math.sin(ang)*joyVec.x*spd*dt;
+vel.x+=Math.cos(ang)*joyVec.x*spd*dt;
+}
+
+player.pos.x+=vel.x*dt;
+player.pos.z+=vel.z*dt;
+player.pos.y+=vel.y*dt;
+
+const py=Math.floor(player.pos.y-player.height);
+const px=Math.floor(player.pos.x);
+const pz=Math.floor(player.pos.z);
+
+if(py>=0){
+if(!inHouse&&world[px]&&world[px][pz]&&world[px][pz][py]){
+player.pos.y=py+player.height+1;
+vel.y=0;
+onGround=true;
+}else if(inHouse&&py<housePos.y+1){
+player.pos.y=housePos.y+player.height+1;
+vel.y=0;
+onGround=true;
+}else{
+onGround=false;
+}
+}
+
+if(player.pos.y<0)player.pos.y=10;
+
+checkPortal();
+
+cam.position.copy(player.pos);
+cam.position.y+=1.6;
+cam.rotation.set(camRot.x,camRot.y,0);
+
+hammer.position.set(0.3,-0.4,-0.5);
+
+scene.children.forEach(obj=>{
+if(obj.userData.vel){
+obj.position.add(obj.userData.vel.clone().multiplyScalar(dt));
+obj.userData.vel.y-=9.8*dt;
+obj.userData.life-=dt;
+if(obj.userData.life<=0)scene.remove(obj);
+}
+});
+
+document.getElementById('pos').textContent=`${px},${py},${pz}`;
+
+renderer.render(scene,cam);
+}
+
+init();
+</script>
+</body>
+</html>
